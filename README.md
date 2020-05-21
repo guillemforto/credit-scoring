@@ -1,12 +1,11 @@
 # Credit scoring
 
-This is a classical supervised classification problem, where we tried to predict Y, which takes 0 if the credit is issued, and 1 otherwise.
+When a bank loans, it becomes important to asses their clients' repayment abilities. This is a classical supervised classification problem where we address this problem: predicting a binary variable Y, which takes 0 if the credit is issued, and 1 otherwise.
 
 **Dates:** December 2019
 
-**Authors:** Estée DAGNEAUX / Guillem FORTÓ<br>
+**Authors:** Estée DAGNEAUX / Guillem FORTÓ
 This project was part of the Mathematics of Deep Learning course of the M2 Statistics and Econometrics, at Toulouse School of Economics.
-
 
 
 ## Running the code
