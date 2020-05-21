@@ -1,6 +1,6 @@
 # Credit scoring
 
-When a bank loans, it becomes important to asses their clients' repayment abilities. This is a classical supervised classification problem where we address this problem: predicting a binary variable Y, which takes 0 if the credit is issued, and 1 otherwise.
+When a bank loans, it becomes important to asses their clients' repayment abilities. This is the repository for a classical supervised classification problem written in R where we address this problem: predicting a binary variable Y, which takes 0 if the credit is issued, and 1 otherwise.
 
 **Dates:** December 2019
 
