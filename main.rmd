@@ -1,0 +1,376 @@
+---
+title: "Credit Scoring"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(DMwR)
+library(fastDummies)
+library(caret)
+library(eeptools)
+library(tidyselect)
+library(ggplot2)
+library(scales)
+library(DMwR)
+library(xgboost)
+library(e1071) 
+library(ElemStatLearn) 
+```
+
+## Loading Data
+```{r data}
+rm(list = ls())
+Credit_Train <- read.csv("CreditTraining.csv")
+Credit_Test <- read.csv("CreditTesting.csv", sep=";")
+
+glimpse(Credit_Train)
+
+Credit_Train$is_train = 1
+Credit_Test$is_train = 0 
+df <- rbind(Credit_Train, Credit_Test )
+```
+
+The dataset $df$ contains both the train (5380 customers) and test (1345 customers) datasets concatenated. We included a variable is_train in order to be able to recover both datasets at the end in the modeling part.
+Here we are in a classical supervised classification problem, where we will try to predict Y, which takes 0 if the credit is issued, and 1 otherwise. For this we will use variables related to the client and the product that he is purchasing.
+
+## Variables cleaning
+### Fixing types
+We start by converting Y to a factor, fixing the dates types, and converting Net_Annual_Income to numerical.
+```{r types}
+# Convert columns to factor
+df$Id_Customer <- factor(df$Id_Customer)
+df$Y <- factor(df$Y, levels = c(1,0))
+
+# Convert columns to date
+df$BirthDate <- as.Date(as.character(df$BirthDate),
+                                 format = "%d/%m/%Y",
+                                 origin="1970-01-01")
+
+df$Customer_Open_Date <- as.Date(as.character(df$Customer_Open_Date), 
+                                          format = "%d/%m/%Y", 
+                                          origin="1970-01-01")
+
+df$Prod_Decision_Date <- as.Date(as.character(df$Prod_Decision_Date), 
+                                                format = "%d/%m/%Y",
+                                                origin="1970-01-01")
+
+df$Prod_Closed_Date <- as.Date(as.character(df$Prod_Closed_Date), 
+                               format = "%d/%m/%Y",
+                               origin="1970-01-01")
+
+# Convert Net_Annual_Income to numeric
+df$Net_Annual_Income <- as.numeric(sub(",","", df$Net_Annual_Income))
+```
+
+### Dealing with dates
+Here we simply transform the BirthDate into a variable Age in order to have a useful numerical variable. There are 3 more variables containing successive dates: $Customer\_Open\_Date$, which is the first date when the client requested the product, $Prod\_Decision\_Date$, which is the date when the bank took the decision to grant him the credit or not, and finally $Prod\_Closed\_Date$, which corresponds to the date the bank closes the product (it is not offered anymore).
+We will compute the difference between $Customer\_Open\_Date - Prod\_Decision\_Date$, because a client which is likely to be eligible for a credit may receive a decision quicker for instance. By having a glimpse of $df$, we can see that $Prod\_Closed\_Date$ seems to contain a lot of missing values, so we won't do anything with it.
+```{r}
+# New variables using dates
+df$Age <- age_calc(df$BirthDate, units = "years")
+df$Opening_to_Decision <- as.numeric(df$Prod_Decision_Date - df$Customer_Open_Date)
+
+# Dropping useless ones
+df$BirthDate = NULL
+df$Customer_Open_Date = NULL
+df$Prod_Decision_Date = NULL
+df$Prod_Closed_Date = NULL
+```
+
+### Dealing with factor labels
+This part will be useful in the encoding and modelisations steps later on, because the modalities of these qualitative variables will become columns and so they will be correctly named.
+```{r}
+df$Customer_Type <- factor(df$Customer_Type, 
+                           levels = c("Non Existing Client", "Existing Client"),
+                           labels = c("Non_Existing_Client", "Existing_Client"))
+
+df$Educational_Level <- factor(df$Educational_Level,
+                               levels = c("Secondary or Less", "Diploma",
+                                          "University", "Master/PhD"),
+                               labels = c("Secondary_or_Less", "Diploma",
+                                          "University", "Master_PhD"))
+
+df$Type_Of_Residence <- factor(df$Type_Of_Residence,
+                               levels = c("Owned", "Parents", "New rent", 
+                                          "Old rent", "Company"),
+                               labels = c("Owned", "Parents", "New_rent", 
+                                          "Old_rent", "Company"))
+```
+
+## Summary Statistics
+```{r}
+# Barplot for every numerical variable
+varnames = names(df)
+varnames = varnames[varnames != "Id_Customer"]
+varnames = varnames[varnames != "is_train"]
+
+summary(select(df, varnames))
+for (varname in varnames) {
+  print(qplot(data = df, get(varname), xlab = varname))
+}
+```
+
+Observations:
+- Among numerical variables, Age, Net_Annual_Income and Opening_to_Decision are continuous (the rest are discrete).
+
+- The dataset is not well balanced regarding the target variable
+
+- Opening_to_decision: very right skewed with a left peak
+
+- Outliers: number of dependant has max at 20? / years at business has max at 98 ?? and net annual income has a lot of very small (min at 1) and very large values (max at 717792).
+
+- NAN : 
+** Number_Of_Dependant has 2 NA
+** Net_Annual_Income has 3 NA
+** Years_At_Business has 4 NA
+
+## Dealing with the NANs
+```{r}
+list_na <- apply(df, 2, anyNA)
+which(list_na == TRUE)
+col_indices = which(names(df) %in% names(which(list_na==TRUE)))
+
+
+# Median for numerical variables 
+medians <- apply(select(df, col_indices),
+                        2,
+                        median, 
+                        na.rm = TRUE)
+medians
+
+# Replace in the numeric variable
+df <- df %>% mutate(Number_Of_Dependant_2  = ifelse(is.na(Number_Of_Dependant),
+                                                    medians[1], 
+                                                    Number_Of_Dependant), 
+                    Net_Annual_Income_2= ifelse(is.na(Net_Annual_Income),
+                                                medians[2],
+                                                Net_Annual_Income),
+                    Years_At_Business_2= ifelse(is.na(Years_At_Business),
+                                                medians[3],
+                                                Years_At_Business))
+
+# Drop columns
+df2 <- df[,-col_indices]
+```
+
+## Net Annual Income
+```{r}
+# We turn it into a qualitative variable
+quantiles = quantile(df2$Net_Annual_Income_2, seq(.05, 1-0.05, 0.1))
+New_var = 0 * df2$Net_Annual_Income_2
+for (i in 1:length(quantiles)) {
+  New_var = New_var + (df2$Net_Annual_Income_2 >= quantiles[i])
+}
+New_var = factor(New_var, ordered=FALSE, levels=c(0:length(quantiles)))
+df2$Net_Annual_Income_2 = New_var
+```
+
+## Log+1-transforming the numerical variables with large variance
+It brings variables closer to normality and mitigates the effect of outliers
+```{r}
+df2$Age = log(df2$Age + 1)
+df2$Years_At_Residence = log(df2$Years_At_Residence + 1)
+df2$Years_At_Business_2 = log(df2$Years_At_Business_2 + 1)
+df2$Number_Of_Dependant_2 = log(df2$Number_Of_Dependant_2 + 1)
+df2$Opening_to_Decision = log(df2$Opening_to_Decision + 1)
+```
+
+# Conditional density plots for continous numerical variables
+```{r}
+cond_density_plot <- function(var) {
+  ggplot(df2) + 
+  aes(x = var, fill = Y) +
+  xlab(substring(deparse(substitute(var)), 5)) +
+  scale_fill_discrete(name = "Y", labels = c("Credit issued", "Credit not issued")) +
+  geom_density(alpha = 0.5)
+}
+
+cond_density_plot(df2$Age)
+cond_density_plot(df2$Opening_to_Decision)
+```
+We can see that the conditional distributions look very similar in both cases. As we said, people for which the credit is issued tend to receive a quicker answer from the bank.
+
+# Conditional barplots for the other variables
+```{r}
+to_remove <- c("Age", "Opening_to_Decision", "Id_Customer", "Y", "is_train")
+namesdf2 <- names(df2)[! names(df2) %in% to_remove]
+for (varname in namesdf2) {
+  print(qplot(data = df2, get(varname), fill = Y, xlab = varname))
+}
+```
+
+## Creating dummies (One-hot encoding)
+```{r}
+one_hot_encode <- function(var, dataframe) {
+  # Encoding
+  new_df <- cbind(dataframe, as.data.frame(dummy_cols(var))[,-1])
+  
+  # Removing last modality
+  new_df[length(new_df)] <- NULL
+  
+  # Naming correctly
+  var_name = substring(deparse(substitute(var)), 5)
+  nb_levels <- length(levels(var))
+  levels <- levels(var)[1:nb_levels-1]
+  for (i in 1:length(levels)) {
+    new_name = paste(var_name, levels[i], sep="_")
+    levels[i] <- new_name
+  }
+  for (i in 1:length(levels)) {
+    colnames(new_df)[i + length(dataframe)] <- levels[i]
+  }
+  
+  # Removing initial variable
+  new_df = new_df[, !(names(new_df) == var_name)]
+  
+  return(new_df)
+}
+
+vars_to_encode = c("Customer_Type", "P_Client", "Educational_Level",
+                   "Marital_Status", "Prod_Sub_Category", "Source",
+                   "Type_Of_Residence")
+df2 <- one_hot_encode(df2$Customer_Type, df2)
+df2 <- one_hot_encode(df2$P_Client, df2)
+df2 <- one_hot_encode(df2$Educational_Level, df2)
+df2 <- one_hot_encode(df2$Marital_Status, df2)
+df2 <- one_hot_encode(df2$Prod_Sub_Category, df2)
+df2 <- one_hot_encode(df2$Source, df2)
+df2 <- one_hot_encode(df2$Type_Of_Residence, df2)
+df2 <- one_hot_encode(df2$Prod_Category, df2)
+```
+
+# Preparation for modelling
+```{r}
+# Removing Id_customer
+df2$Id_Customer <- NULL
+
+# train and test sets
+train = df2[df2$is_train == 1,]
+train$is_train <- NULL
+
+test = df2[df2$is_train == 0,]
+test$is_train <- NULL
+
+true_Y_test <- test$Y
+test$Y <- NULL
+```
+
+## Re sampling
+```{r}
+trainSplit <- SMOTE(Y ~ ., data = train, perc.over = 100, perc.under = 200)
+# perc.over (under-sampling): what percentage of extra cases from the minority class are generated, based on k=5 by default nearest neighbours (ex: 100 will double the number of minority cases)
+# perc.under (over-sampling): what percentage of cases from the majority class are selected (ex: 100 will select exactly 1 majority case for every new minority case generated)
+table(train$Y)
+table(trainSplit$Y)
+``` 
+
+# Modelling
+We impose 10 Cross-validations and fix a Seed to compare models without being exposed to randomness
+```{r}
+V <- 10
+T <- 4
+TrControl <- trainControl(method = "repeatedcv",
+                          number = V,
+                          repeats = T)
+set.seed(345)
+```
+
+```{r}
+Errs_folds <- function(Model, Name) {
+  return(data.frame(Model$resample, model = Name))
+}
+
+Err_train <- function(errs_folds, Model, Name) {
+  errs <- Errs_folds(Model, Name)
+  err_train <- data.frame(mAccuracy = mean(errs$Accuracy, na.rm = TRUE),
+                          mKappa = mean(errs$Kappa, na.rm = TRUE))
+  return(err_train)
+}
+
+Err_test <- function(Model, Name) {
+  err_test <- data.frame(t(postResample(predict(Model, newdata = test), 
+                                        true_Y_test)),
+                         model = Name)
+  return(err_test)
+}
+```
+
+
+```{r}
+CaretLearnAndDisplay <- function(Name, Formula, Method) {
+  Model <- train(as.formula(Formula), 
+                 data = trainSplit, 
+                 method = Method, 
+                 trControl = TrControl)
+  print(Model)
+  errs_folds <- Errs_folds(Model, Name)
+  print(errs_folds)
+  print(Err_train(errs_folds, Model, Name))
+  print(Err_test(Model, Name))
+}
+```
+
+# Trying various models
+## Logistic model
+```{r}
+CaretLearnAndDisplay("Logistic", "Y ~ .", "glm")
+``` 
+
+## Simple tree (CART)
+```{r}
+CaretLearnAndDisplay("Tree", "Y ~ .", "treebag")
+``` 
+
+## XGBoost
+```{r}
+labels <- data.matrix(trainSplit$Y)
+xgb <- xgboost(data = data.matrix(trainSplit[,-1]), 
+               label = labels, 
+               eta = 0.01,
+               max_depth = 15, 
+               nround=25, 
+               subsample = 0.5,
+               colsample_bytree = 0.5,
+               eval_metric = "error",
+               objective = "binary:logistic",
+               nthread = 4,
+               verbose = FALSE
+)
+
+y_pred <- predict(xgb, data.matrix(test)) # This outputs a vector of probabilites
+
+# Confusion matrix
+cm = table(true_Y_test, as.numeric(y_pred > 0.5)) 
+cm
+
+# Metrics
+precision = (cm[1,2]) / (cm[1,2] + cm[2,2])
+recall = (cm[1,2]) / (cm[1,2] + cm[0,0])
+f1_score = 2 * (precision*recall)/(precision+recall)
+f1_score
+```
+
+## Support Vector Machine
+```{r}
+classifier = svm(formula = Y ~ ., 
+                 data = trainSplit, 
+                 type = 'C-classification', 
+                 kernel = 'linear')
+```
+```{r}
+y_pred = predict(classifier, newdata = test) 
+```
+
+Evaluation metrics
+```{r}
+cm = table(true_Y_test, y_pred) 
+cm
+err <- mean(as.numeric(y_pred) != true_Y_test)
+print(paste("False Positives + False Negatives=", err))
+```
+
+Overall, XGBoost is by far the best technique by far!  Support Vector Machine performed awfully bad. It improved the simple Logistic Model and the CART model and we got an accuracy of 88%.
