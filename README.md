@@ -1,2 +1,2 @@
-# credit-scoring
+# Credit scoring
 Assessing creditworthiness
