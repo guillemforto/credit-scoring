@@ -4,7 +4,7 @@ When a bank loans, it becomes important to asses their clients' repayment abilit
 
 **Dates:** December 2019
 
-**Authors:** Estée DAGNEAUX / Guillem FORTÓ
+**Authors:** Estée DAGNEAUX / Guillem FORTÓ<br>
 This project was part of the Mathematics of Deep Learning course of the M2 Statistics and Econometrics, at Toulouse School of Economics.
 
 
